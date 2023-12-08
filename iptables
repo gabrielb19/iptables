@@ -1,0 +1,104 @@
+*nat
+
+# nateo fuente desde la lan hacia internet
+-A POSTROUTING -s 192.168.136.0/24 -o ens256 -j SNAT --to 172.24.133.136
+
+# nateo fuente desde la dmz hacia internet
+-A POSTROUTING -s 192.168.139.0/24 -o ens256 -j SNAT --to 172.24.133.136
+
+# nateo destino desde la internet hacia el servidor de servicios de la dmz
+-A PREROUTING -p tcp -i ens256 -d 172.24.133.136 -j DNAT --to-destination 192.168.139.2
+
+# nateo destino desde la internet hacia las diferentes máquinas de la lan
+-A PREROUTING -p tcp -i ens256 -d 172.24.133.136 -j DNAT --to-destination 192.168.136.0/24
+COMMIT
+
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+
+
+-A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -p icmp -j ACCEPT
+-A INPUT -i lo -j ACCEPT
+
+
+# Para conectarse al firewall desde otros lugares por ssh.
+-A INPUT -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT
+
+# Con los que ya estableción conexión, los deja pasar
+-A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+
+# Ping hacia afuera
+-A FORWARD -p icmp --icmp-type 8 -m state --state NEW -s 192.168.136.0/24 -j ACCEPT
+-A FORWARD -p icmp --icmp-type 8 -m state --state NEW -s 192.168.139.0/24 -j ACCEPT
+
+
+# Para dejar salir de la red interna todos los dns(puerto 53) nuevos.
+-A FORWARD -p udp -m udp --dport 53 -m state --state NEW -o ens256 -j ACCEPT
+
+
+# para dejar salir de la red interna todos los http y https(puerto 80 y 44) nuevos.
+-A FORWARD -p tcp -m tcp -m multiport --dports 80,443 -m state --state NEW -o ens256 -j ACCEPT
+
+# ------------------------------- DMZ ------------------------------------------------------- 
+# Permitir el acceso hacia el servidor web a los usuarios de la LAN y a usuarios de Internet.
+# Para usuarios de la LAN:
+-A FORWARD -p tcp -m tcp -m multiport --dports 80,443 -m state --state NEW -s 192.168.136.0/24 -d 192.168.139.0/24 -j ACCEPT
+# Para usuarios de Internet:
+-A INPUT -p tcp -m state --state NEW -m tcp --dport 80,443 -j ACCEPT
+-A FORWARD -p tcp -m tcp --dport 80,443 -m state --state NEW -s 172.24.133.136 -d 192.168.139.2 -j ACCEPT
+
+# Permitir el acceso hacia el servidor de correo a usuarios de la LAN y a usuarios de Internet.
+# Para usuarios de la LAN:
+-A FORWARD -p tcp -m tcp -m multiport --dports 587,995,25 -m state --state NEW -s 192.168.136.0/24 -d 192.168.139.0/24 -j ACCEPT
+# Para usuarios de internet
+-A INPUT -p tcp -m state --state NEW -m tcp --dports 587,995,25 -j ACCEPT
+-A FORWARD -p tcp -m tcp --dport 587,995,25 -m state --state NEW -s 172.24.133.136 -d 192.168.139.2 -j ACCEPT
+
+# Permitir el envío de correos desde el servidor de correos hacia otros servidores de correo en Internet.
+-A FORWARD -s 192.168.139.2 -p tcp --dports 587, 995, 25 -m state --state NEW -j ACCEPT
+
+# No permitir (explícitamente) el acceso desde Internet al servidor de base de datos.
+-A INPUT -p tcp -s 192.168.139.2 --dport 3306 -j DROP
+
+# Permitir la navegación de los servidores de la DMZ para actualizaciones de software.
+-A FORWARD -s 192.168.139.0/24 -p tcp --dport 80,443 -m state --state NEW,ESTABLISHED -j ACCEPT
+-A FORWARD -s 192.168.136.0/24 -p tcp --dport 80,443 -m state --state NEW,ESTABLISHED -j ACCEPT
+# ---------------------------------------------------------------------------------------------
+
+# ------------------------------LAN------------------------------------------------------------
+# Permitir la navegación de usuarios solamente a través del servidor proxy.
+
+# Permitir envío de información del servidor de base de datos de la LAN hacia el servidor de base de datos de la DMZ.
+-A FORWARD -p tcp -m tcp --dport 3306 -m state --state NEW -s 192.168.136.2 -d 192.168.139.2 -j ACCEPT
+
+# Permitir acceso desde la LAN hacia los servicios de correo y web de la DMZ.
+sudo iptables -A INPUT -p tcp -s 192.168.136.0/24 -d 192.168.136.2 --dports 587, 995, 25 -j ACCEPT
+
+# Permitir el acceso para administración por SSH hacia los servidores de la DMZ desde la LAN para el equipo del administrador.
+-A FORWARD -p tcp -m tcp --dport 22 -m state --state NEW,ESTABLISHED -s 192.168.136.4 -d 192.168.139.0/24 -j ACCEPT
+
+# Permitir el acceso a servidores ftp en Internet al administrador de la red.
+-A FORWARD -s 192.168.140.4/24 -d 0.0.0.0/0 -p tcp --dport 20 -m state --state NEW -j ACCEPT
+-A FORWARD -s 192.168.140.4/24 -d 0.0.0.0/0 -p tcp --dport 21 -m state --state NEW -j ACCEPT
+# --------------------------------------------------------------------------------------------
+
+# ------------------------------------ Funcionalidades extra ---------------------------------
+# Monitoreo estricto para 192.168.139.2
+sudo iptables -A INPUT -p tcp --dport 22 -s 192.168.139.2 -m state --state NEW -m recent --set --name SSH_MON
+sudo iptables -A INPUT -p tcp --dport 22 -s 192.168.139.2 -m state --state NEW -m recent --update --seconds 60 --hitcount 20 --name SSH_MON -j LOG --log-prefix "SSH Attack (192.168.139.2): "
+sudo iptables -A INPUT -p tcp --dport 22 -s 192.168.139.2 -m state --state NEW -m recent --update --seconds 60 --hitcount 20 --name SSH_MON -j DROP
+
+# Monitoreo estricto para 192.168.139.34
+sudo iptables -A INPUT -p tcp --dport 22 -s 172.24.133.136 -m state --state NEW -m recent --set --name SSH_MON
+sudo iptables -A INPUT -p tcp --dport 22 -s 172.24.133.136 -m state --state NEW -m recent --update --seconds 60 --hitcount 20 --name SSH_MON -j LOG --log-prefix "SSH Attack (172.24.133.136): "
+sudo iptables -A INPUT -p tcp --dport 22 -s 172.24.133.136 -m state --state NEW -m recent --update --seconds 60 --hitcount 20 --name SSH_MON -j DROP
+
+
+sudo iptables -A INPUT -p tcp --dport 25 -m state --state NEW -m recent --set --name SMTP
+sudo iptables -A INPUT -p tcp --dport 25 -m state --state NEW -m recent --update --seconds 60 --hitcount 20 --name SMTP -j LOG --log-prefix "SMTP Connection Limit Exceeded: " --log-level warning
+sudo iptables -A INPUT -p tcp --dport 25 -m state --state NEW -m recent --update --seconds 60 --hitcount 20 --name SMTP -j DROP
+# --------------------------------------------------------------------------------------------
